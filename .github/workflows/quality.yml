@@ -120,21 +120,73 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # The free gitleaks CLI (gitleaks-action@v2 needs a paid license on organization repos).
+  # Keep the name "Secret scan": main's branch protection requires that check.
+  # Coverage is the same as the action's: a PR's own commits, a push's new commits.
   secrets:
     name: Secret scan
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      # sha256 of gitleaks_8.30.1_linux_x64.tar.gz. Bump both together; the install step also
+      # checks this value against the release's own checksums file.
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
     steps:
       - name: Check out full history
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Scan repository history
-        uses: gitleaks/gitleaks-action@v2
+      - name: Install gitleaks (pinned, checksum-verified)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          sums="gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          curl -fsSL --retry 3 -o "$tarball" "$base/$tarball"
+          curl -fsSL --retry 3 -o "$sums" "$base/$sums"
+          # The release's checksums file must list exactly the pinned hash for this tarball...
+          grep -qxF "${GITLEAKS_SHA256}  ${tarball}" "$sums" \
+            || { echo "::error::pinned GITLEAKS_SHA256 does not match the release checksums file"; exit 1; }
+          # ...and the downloaded bytes must hash to it.
+          echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum -c -
+          mkdir -p bin
+          tar -xzf "$tarball" -C bin gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Scan new commits
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_ENABLE_COMMENTS: false
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          gitleaks version
+          zero=0000000000000000000000000000000000000000
+          if [ "$EVENT" = "pull_request" ]; then
+            range="${PR_BASE}..${PR_HEAD}"
+          elif [ "$EVENT" = "push" ] && [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "$zero" ]; then
+            if git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+              range="${PUSH_BEFORE}..${SHA}"
+            else
+              echo "::warning::previous head ${PUSH_BEFORE} is not in history; scanning the pushed head commit only"
+              range="${SHA}^..${SHA}"
+            fi
+          else
+            # e.g. a release tag push through workflow_call: no new commits, as with the action.
+            echo "No new commits to scan for this ${EVENT} event."
+            exit 0
+          fi
+          echo "Scanning ${range}"
+          # Findings fail the job (exit 1); secret values are redacted from the log. A repo-root
+          # .gitleaks.toml / .gitleaksignore, if one is ever added, is picked up automatically.
+          gitleaks git --redact --no-banner --exit-code 1 --log-opts="--no-merges --first-parent ${range}" .
 
   artifacts:
     name: Versioned artifacts and SBOM
