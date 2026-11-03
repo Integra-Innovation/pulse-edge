@@ -78,6 +78,12 @@ export const th: typeof en = {
   alerts: {
     syncPausedTitle: 'หยุดการซิงค์ข้อมูลชั่วคราว:',
     syncPausedMsg: 'ระบบซิงค์ข้อมูลถูกระงับชั่วคราว แพ็กเก็ตข้อมูลจะถูกสะสมไว้ในบัฟเฟอร์ฐานข้อมูล SQLite Local',
+    historyPausedTitle: 'PULSE Cloud หยุดบันทึกประวัติข้อมูลชั่วคราว:',
+    historyPausedReasonIot: 'ใช้โควตา IoT ของเดือนนี้ครบแล้ว',
+    historyPausedReasonStorage: 'พื้นที่จัดเก็บบนคลาวด์เต็ม',
+    historyPausedReasonUnknown: 'องค์กรใช้งานถึงขีดจำกัดของคลาวด์แล้ว',
+    historyPausedSince: 'ตั้งแต่ {{since}}',
+    historyPausedMsg: 'ไม่ใช่ปัญหาเครือข่าย ค่าล่าสุดและการแจ้งเตือนยังทำงานตามปกติ ข้อมูลที่ส่งระหว่างหยุดบันทึกจะไม่ถูกเก็บเป็นประวัติและจะไม่ถูกส่งย้อนหลัง การบันทึกจะกลับมาเองในเดือนถัดไป หรือเมื่อเพิ่มความจุใน PULSE',
     criticalAlerts: 'การแจ้งเตือนวิกฤตของระบบ',
     viewLogs: 'ดูบันทึกเหตุการณ์ระบบ',
   },

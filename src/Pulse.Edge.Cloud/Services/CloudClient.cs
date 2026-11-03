@@ -19,6 +19,19 @@ public enum TelemetrySyncResult
     Unauthorized
 }
 
+/// <summary>
+/// The cloud's "history paused" notice on a 202 from POST /edge/telemetry (edge contract §5.4):
+/// the organization used its monthly IoT allowance (<c>iot</c>) or its storage is full
+/// (<c>storage</c>). The batch counts as delivered, but the cloud kept no history for it; only
+/// each metric's latest value (live readings, alarms). <see cref="Quota"/> is <c>iot</c>,
+/// <c>storage</c>, or <c>unknown</c> for a value this edge does not know yet. <see cref="SinceUtc"/>
+/// is null when the server's timestamp is missing or unreadable.
+/// </summary>
+public sealed record HistoryPauseNotice(string Quota, DateTime? SinceUtc);
+
+/// <summary>A telemetry upload's result plus the history-paused notice, if the 202 carried one.</summary>
+public sealed record TelemetrySendOutcome(TelemetrySyncResult Result, HistoryPauseNotice? HistoryPause = null);
+
 public enum OeeSyncResult
 {
     Success,
@@ -398,6 +411,56 @@ public class CloudClient
     /// Sends a batch of telemetry frames to the cloud (POST /edge/telemetry).
     /// </summary>
     public async Task<TelemetrySyncResult> SendTelemetryBatchAsync(string baseUrl, string deviceId, string apiKey, System.Collections.Generic.List<Pulse.Edge.Storage.Models.QueueTelemetry> batch)
+        => (await SendTelemetryBatchWithOutcomeAsync(baseUrl, deviceId, apiKey, batch)).Result;
+
+    /// <summary>
+    /// Reads a 202 body from POST /edge/telemetry. Never throws: a 202 means the cloud took the
+    /// batch, so an unreadable body or a malformed <c>quota_exceeded</c> must not turn that
+    /// success into a retry (a retry is dropped the same way, so it would loop forever).
+    /// Unknown fields are ignored. Returns a null response when the counts can't be read.
+    /// </summary>
+    public static (TelemetryResponse? Response, HistoryPauseNotice? HistoryPause) ParseTelemetryAccepted(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return (null, null);
+        JsonObject? root;
+        try { root = JsonNode.Parse(body) as JsonObject; }
+        catch (JsonException) { return (null, null); }
+        if (root == null) return (null, null);
+
+        TelemetryResponse? response = null;
+        try { response = root.Deserialize<TelemetryResponse>(JsonOptions); }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or NotSupportedException) { response = null; }
+
+        return (response, ParseHistoryPause(root["quota_exceeded"]));
+    }
+
+    /// <summary>The notice only when <c>history</c> is exactly <c>paused</c>; anything else is not one.</summary>
+    private static HistoryPauseNotice? ParseHistoryPause(JsonNode? node)
+    {
+        if (node is not JsonObject q) return null;
+        if (!TryGetString(q["history"], out var history) || history != "paused") return null;
+        var quota = TryGetString(q["quota"], out var qv) && (qv == "iot" || qv == "storage") ? qv! : "unknown";
+        DateTime? since = null;
+        if (TryGetString(q["since"], out var sv)
+            && DateTimeOffset.TryParse(sv, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal, out var dto))
+        {
+            since = dto.UtcDateTime;
+        }
+        return new HistoryPauseNotice(quota, since);
+    }
+
+    private static bool TryGetString(JsonNode? node, out string? value)
+    {
+        value = null;
+        return node is JsonValue v && v.TryGetValue(out value);
+    }
+
+    /// <summary>
+    /// Sends a batch of telemetry frames to the cloud (POST /edge/telemetry) and also returns the
+    /// history-paused notice a 202 may carry (contract §5.4).
+    /// </summary>
+    public async Task<TelemetrySendOutcome> SendTelemetryBatchWithOutcomeAsync(string baseUrl, string deviceId, string apiKey, System.Collections.Generic.List<Pulse.Edge.Storage.Models.QueueTelemetry> batch)
     {
         _logger.LogInformation("[Cloud Sync] Uploading {Count} telemetry frame(s) to PULSE Cloud (POST /edge/telemetry)...", batch.Count);
 
@@ -456,7 +519,20 @@ public class CloudClient
 
             if (response.StatusCode == HttpStatusCode.Accepted) // 202 Accepted
             {
-                var res = await response.Content.ReadFromJsonAsync<TelemetryResponse>(options);
+                var body = await response.Content.ReadAsStringAsync();
+                var (res, historyPause) = ParseTelemetryAccepted(body);
+                if (res == null)
+                {
+                    // Still delivered: the server answered 202. Only the counts are lost.
+                    _logger.LogWarning("[Cloud Sync] Telemetry batch accepted (202) but the response body could not be read; treating it as delivered.");
+                }
+                if (historyPause != null)
+                {
+                    // Expected while the org is over its IoT allowance or storage; SyncService
+                    // announces the state change once, so this stays at Information.
+                    _logger.LogInformation("[Cloud Sync] PULSE Cloud reports history paused (quota: {Quota}, since: {Since}); the batch is delivered and latest values stay live.",
+                        historyPause.Quota, historyPause.SinceUtc?.ToString("o", System.Globalization.CultureInfo.InvariantCulture) ?? "unknown");
+                }
                 if (res != null)
                 {
                     _logger.LogInformation("[Cloud Sync] Telemetry batch processed. Accepted: {Accepted}, Rejected: {Rejected}", res.Accepted, res.Rejected);
@@ -474,30 +550,30 @@ public class CloudClient
                         }
                     }
                 }
-                return TelemetrySyncResult.Success;
+                return new TelemetrySendOutcome(TelemetrySyncResult.Success, historyPause);
             }
             else if (response.StatusCode == HttpStatusCode.BadRequest) // 400 Bad Request
             {
                 var err = await response.Content.ReadAsStringAsync();
                 _logger.LogError("[Cloud Sync] Telemetry batch rejected with 400 Bad Request. Error: {Error}", err);
-                return TelemetrySyncResult.ClientError;
+                return new TelemetrySendOutcome(TelemetrySyncResult.ClientError);
             }
             else if (response.StatusCode == HttpStatusCode.Unauthorized) // 401 Unauthorized
             {
                 _logger.LogError("[Cloud Sync] Telemetry batch rejected with 401 Unauthorized. API Key may be invalid/revoked.");
-                return TelemetrySyncResult.Unauthorized;
+                return new TelemetrySendOutcome(TelemetrySyncResult.Unauthorized);
             }
             else
             {
                 var err = await response.Content.ReadAsStringAsync();
                 _logger.LogWarning("[Cloud Sync] Telemetry batch failed with status {StatusCode}. Error: {Error}", response.StatusCode, err);
-                return TelemetrySyncResult.TransientError;
+                return new TelemetrySendOutcome(TelemetrySyncResult.TransientError);
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Exception during telemetry transmission to {BaseUrl}", baseUrl);
-            return TelemetrySyncResult.TransientError;
+            return new TelemetrySendOutcome(TelemetrySyncResult.TransientError);
         }
     }
 

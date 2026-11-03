@@ -76,6 +76,12 @@ export const en = {
   alerts: {
     syncPausedTitle: 'Sync Loop Paused:',
     syncPausedMsg: 'Synchronization loop is currently paused. Telemetry packets are building up in the SQLite database queue buffer.',
+    historyPausedTitle: 'PULSE Cloud history recording paused:',
+    historyPausedReasonIot: 'the monthly IoT allowance is used up.',
+    historyPausedReasonStorage: 'cloud storage is full.',
+    historyPausedReasonUnknown: 'the organization reached a cloud limit.',
+    historyPausedSince: 'Since {{since}}.',
+    historyPausedMsg: 'This is not a network problem: live readings and alarms keep working. Data sent during the pause is not stored as history and will not be backfilled. Recording resumes on its own next month or once capacity is added in PULSE.',
     criticalAlerts: 'Critical System Alerts',
     viewLogs: 'View Diagnostic Logs',
   },

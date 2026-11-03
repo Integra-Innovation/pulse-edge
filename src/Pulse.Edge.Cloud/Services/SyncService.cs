@@ -46,7 +46,6 @@ public class SyncService
 
                 bool syncEnabled = config.IsSyncEnabled;
                 string currentApiKey = config.ApiKey;
-                string currentDeviceId = config.Id;
 
                 if (syncEnabled)
                 {
@@ -60,53 +59,12 @@ public class SyncService
 
                     if (!string.IsNullOrEmpty(currentApiKey))
                     {
-                        // 1. Process Telemetry batch
-                        var telemetryBatch = await _storageService.GetPendingTelemetryBatchAsync(batchSize: 100);
-                        if (telemetryBatch.Any())
+                        var step = await SyncTelemetryOnceAsync(config!, currentBaseUrl);
+                        processedAnyData = step.ProcessedAny;
+                        if (step.BackOff)
                         {
-                            processedAnyData = true;
-                            
-                            // Attempt cloud transmission
-                            var result = await _cloudClient.SendTelemetryBatchAsync(currentBaseUrl, currentDeviceId, currentApiKey, telemetryBatch);
-                            var ids = telemetryBatch.Select(x => x.Id).ToList();
-
-                            if (result == TelemetrySyncResult.Success)
-                            {
-                                // Delete from local queue database
-                                await _storageService.CompleteTelemetryBatchAsync(ids);
-                                _logger.LogInformation("[Sync] Successfully synced and cleared {Count} telemetry records.", telemetryBatch.Count);
-                            }
-                            else if (result == TelemetrySyncResult.ClientError)
-                            {
-                                // Remove from outbox because they are malformed and won't succeed on retry
-                                await _storageService.CompleteTelemetryBatchAsync(ids);
-                                _logger.LogError("[Sync] Telemetry upload failed with ClientError (400). Cleared {Count} records to avoid blocking the queue.", telemetryBatch.Count);
-                            }
-                            else if (result == TelemetrySyncResult.Unauthorized)
-                            {
-                                // Unlock records and increment retry counts (keep them queued)
-                                await _storageService.FailTelemetryBatchAsync(ids);
-                                _logger.LogError("[Sync] Telemetry upload failed with Unauthorized (401). API Key has been revoked. Stopping sync loop.");
-
-                                // Clear API key and mark status as Revoked
-                                if (config != null)
-                                {
-                                    config.ApiKey = "";
-                                    config.SiteId = "";
-                                    config.SiteName = "";
-                                    config.CloudStatus = "Revoked";
-                                    await _storageService.SaveDeviceConfigAsync(config);
-                                }
-                            }
-                            else // TransientError
-                            {
-                                // Unlock records and increment retry counts
-                                await _storageService.FailTelemetryBatchAsync(ids);
-                                _logger.LogWarning("[Sync] Telemetry upload failed with TransientError. Re-queued items for retry.");
-                                
-                                // Back off slightly on failure
-                                await Task.Delay(3000, stoppingToken);
-                            }
+                            // Back off slightly on failure
+                            await Task.Delay(3000, stoppingToken);
                         }
                     }
                 }
@@ -129,6 +87,97 @@ public class SyncService
             {
                 await Task.Delay(2000, stoppingToken);
             }
+        }
+    }
+
+    /// <summary>What one telemetry step did: whether a batch was sent, and whether to back off.</summary>
+    public readonly record struct TelemetryStep(bool ProcessedAny, bool BackOff);
+
+    /// <summary>How the stored history-paused state must change after a delivered (202) batch.</summary>
+    public enum HistoryPauseChange { None, Set, Clear }
+
+    /// <summary>
+    /// Edge contract §5.4. A 202 with the paused notice sets the state; a later 202 without it
+    /// clears it. Identical repeated notices change nothing, so the operator sees one stable
+    /// status rather than a stream of updates. Only delivered batches reach here: a failed
+    /// request never announces recovery.
+    /// </summary>
+    public static HistoryPauseChange DecideHistoryPause(string? storedQuota, DateTime? storedSinceUtc, HistoryPauseNotice? notice)
+    {
+        bool storedPaused = !string.IsNullOrEmpty(storedQuota);
+        if (notice == null) return storedPaused ? HistoryPauseChange.Clear : HistoryPauseChange.None;
+        if (storedPaused && storedQuota == notice.Quota && storedSinceUtc == notice.SinceUtc) return HistoryPauseChange.None;
+        return HistoryPauseChange.Set;
+    }
+
+    /// <summary>
+    /// Sends one pending telemetry batch and settles it: per-batch semantics are unchanged.
+    /// A 202 deletes the batch even when the cloud paused history (accepted = 0 is expected
+    /// then; a retry would be dropped the same way, so there is no paused backlog to keep).
+    /// 400 drops it, 401 keeps it and marks the key revoked, anything else keeps it for retry.
+    /// </summary>
+    public async Task<TelemetryStep> SyncTelemetryOnceAsync(Pulse.Edge.Storage.Models.DeviceConfig config, string baseUrl)
+    {
+        var telemetryBatch = await _storageService.GetPendingTelemetryBatchAsync(batchSize: 100);
+        if (!telemetryBatch.Any()) return new TelemetryStep(false, false);
+
+        var outcome = await _cloudClient.SendTelemetryBatchWithOutcomeAsync(baseUrl, config.Id, config.ApiKey, telemetryBatch);
+        var ids = telemetryBatch.Select(x => x.Id).ToList();
+
+        switch (outcome.Result)
+        {
+            case TelemetrySyncResult.Success:
+                // Delete from local queue database
+                await _storageService.CompleteTelemetryBatchAsync(ids);
+                _logger.LogInformation("[Sync] Successfully synced and cleared {Count} telemetry records.", telemetryBatch.Count);
+                await ApplyHistoryPauseAsync(config, outcome.HistoryPause);
+                return new TelemetryStep(true, false);
+
+            case TelemetrySyncResult.ClientError:
+                // Remove from outbox because they are malformed and won't succeed on retry
+                await _storageService.CompleteTelemetryBatchAsync(ids);
+                _logger.LogError("[Sync] Telemetry upload failed with ClientError (400). Cleared {Count} records to avoid blocking the queue.", telemetryBatch.Count);
+                return new TelemetryStep(true, false);
+
+            case TelemetrySyncResult.Unauthorized:
+                // Unlock records and increment retry counts (keep them queued)
+                await _storageService.FailTelemetryBatchAsync(ids);
+                _logger.LogError("[Sync] Telemetry upload failed with Unauthorized (401). API Key has been revoked. Stopping sync loop.");
+
+                // Clear API key and mark status as Revoked
+                config.ApiKey = "";
+                config.SiteId = "";
+                config.SiteName = "";
+                config.CloudStatus = "Revoked";
+                await _storageService.SaveDeviceConfigAsync(config);
+                return new TelemetryStep(true, false);
+
+            default: // TransientError
+                // Unlock records and increment retry counts
+                await _storageService.FailTelemetryBatchAsync(ids);
+                _logger.LogWarning("[Sync] Telemetry upload failed with TransientError. Re-queued items for retry.");
+                return new TelemetryStep(true, true);
+        }
+    }
+
+    private async Task ApplyHistoryPauseAsync(Pulse.Edge.Storage.Models.DeviceConfig config, HistoryPauseNotice? notice)
+    {
+        switch (DecideHistoryPause(config.HistoryPausedQuota, config.HistoryPausedSince, notice))
+        {
+            case HistoryPauseChange.Set:
+                await _storageService.SetHistoryPauseAsync(notice!.Quota, notice.SinceUtc);
+                config.HistoryPausedQuota = notice.Quota;
+                config.HistoryPausedSince = notice.SinceUtc;
+                _logger.LogWarning(
+                    "[Sync] PULSE Cloud paused history recording (quota: {Quota}, since: {Since}). Telemetry is still delivered, so live readings and alarms keep working, but history sent during the pause is not stored and will not be backfilled.",
+                    notice.Quota, notice.SinceUtc?.ToString("o", System.Globalization.CultureInfo.InvariantCulture) ?? "unknown");
+                break;
+            case HistoryPauseChange.Clear:
+                await _storageService.SetHistoryPauseAsync(string.Empty, null);
+                config.HistoryPausedQuota = string.Empty;
+                config.HistoryPausedSince = null;
+                _logger.LogInformation("[Sync] PULSE Cloud is recording history again.");
+                break;
         }
     }
 }
