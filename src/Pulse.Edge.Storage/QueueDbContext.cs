@@ -101,6 +101,10 @@ public class QueueDbContext : DbContext
         modelBuilder.Entity<DeviceConfig>().Property(x => x.ApiKey).HasConversion(secretConverter);
         modelBuilder.Entity<DeviceConfig>().Property(x => x.ClaimSecret).HasConversion(secretConverter);
         modelBuilder.Entity<DeviceConfig>().Property(x => x.PairingToken).HasConversion(secretConverter);
+        // History-paused notice (edge contract §5.4). Same DEFAULT '' as the raw CREATE / ALTER in
+        // QueueStorageService, so a table built by EnsureCreated also accepts rows written
+        // without this column (older code paths, raw inserts).
+        modelBuilder.Entity<DeviceConfig>().Property(x => x.HistoryPausedQuota).HasDefaultValue(string.Empty);
 
         modelBuilder.Entity<OeeChannel>().HasIndex(x => x.ExternalId).IsUnique();
         modelBuilder.Entity<OeeOutboxMessage>().HasIndex(x => new { x.ChannelId, x.Seq }).IsUnique();

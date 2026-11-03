@@ -37,6 +37,14 @@ public static class DashboardEndpoints
             {
                 ConnectionStatus = "Connected",
                 CloudStatus = config?.CloudStatus ?? "PendingApproval",
+                // PULSE Cloud's history-paused notice (edge contract §5.4); null while history records.
+                HistoryPause = string.IsNullOrEmpty(config?.HistoryPausedQuota)
+                    ? null
+                    : new
+                    {
+                        Quota = config.HistoryPausedQuota,
+                        Since = config.HistoryPausedSince.HasValue ? DateTime.SpecifyKind(config.HistoryPausedSince.Value, DateTimeKind.Utc) : (DateTime?)null,
+                    },
                 BufferStatus = pendingTelemetryCount + pendingOeeCount > 0 ? "Buffering" : "Healthy",
                 Version = config?.Version ?? "1.0.0",
                 LastSync = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss UTC", CultureInfo.InvariantCulture),

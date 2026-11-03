@@ -144,7 +144,9 @@ public class QueueStorageService
                     CloudEndpoint TEXT NOT NULL DEFAULT 'http://localhost:3000',
                     Version TEXT NOT NULL DEFAULT '1.0.0',
                     IsSyncEnabled INTEGER NOT NULL DEFAULT 1,
-                    CloudStatus TEXT NOT NULL DEFAULT 'PendingApproval'
+                    CloudStatus TEXT NOT NULL DEFAULT 'PendingApproval',
+                    HistoryPausedQuota TEXT NOT NULL DEFAULT '',
+                    HistoryPausedSince TEXT
                 );
             ");
         }
@@ -204,6 +206,17 @@ public class QueueStorageService
         catch
         {
             // Column already exists, ignore exception
+        }
+
+        // Auto-migrate schema: the cloud's history-paused notice (edge contract §5.4)
+        foreach (var ddl in new[]
+        {
+            "ALTER TABLE DeviceConfigs ADD COLUMN HistoryPausedQuota TEXT NOT NULL DEFAULT '';",
+            "ALTER TABLE DeviceConfigs ADD COLUMN HistoryPausedSince TEXT;",
+        })
+        {
+            try { await db.Database.ExecuteSqlRawAsync(ddl); }
+            catch { /* Column already exists */ }
         }
 
         // Auto-migrate schema: add SiteName column to existing databases if it's missing
@@ -686,6 +699,22 @@ public class QueueStorageService
     {
         using var db = new QueueDbContext();
         return await db.DeviceConfigs.FirstOrDefaultAsync();
+    }
+
+    /// <summary>
+    /// Records the cloud's history-paused state (edge contract §5.4): a quota (<c>iot</c>,
+    /// <c>storage</c>, <c>unknown</c>) and its since, or an empty quota to clear it. Touches only
+    /// these two columns (EF updates just the modified properties), so it never races the other
+    /// config writers. A no-op when no device config exists yet.
+    /// </summary>
+    public async Task SetHistoryPauseAsync(string quota, DateTime? sinceUtc)
+    {
+        using var db = new QueueDbContext();
+        var existing = await db.DeviceConfigs.FirstOrDefaultAsync();
+        if (existing == null) return;
+        existing.HistoryPausedQuota = quota;
+        existing.HistoryPausedSince = string.IsNullOrEmpty(quota) ? null : sinceUtc;
+        await db.SaveChangesAsync();
     }
 
     // Saves the configuration, replacing any older one

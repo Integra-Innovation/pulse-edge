@@ -1,6 +1,14 @@
+/** Edge contract §5.4: the cloud keeps only latest values, not history. `since` is ISO UTC or null. */
+export interface HistoryPause {
+  quota: 'iot' | 'storage' | 'unknown' | string;
+  since: string | null;
+}
+
 export interface DashboardData {
   connectionStatus: string;
   cloudStatus: string;
+  /** PULSE Cloud stopped recording history (IoT allowance used or storage full); null while it records. */
+  historyPause?: HistoryPause | null;
   bufferStatus: string;
   version: string;
   lastSync: string;

@@ -21,4 +21,11 @@ public class DeviceConfig
     public string Version { get; set; } = "1.0.0";
     public bool IsSyncEnabled { get; set; } = true; // Flag to toggle cloud sync on/off
     public string CloudStatus { get; set; } = "PendingApproval"; // e.g. Connected, PendingApproval, Disconnected, Revoked
+
+    // PULSE Cloud's "history paused" notice (edge contract §5.4): set from a 202 that carries
+    // quota_exceeded, cleared by the next 202 without it. Empty = history is recording.
+    // Written only by QueueStorageService.SetHistoryPauseAsync, never by SaveDeviceConfigAsync,
+    // so a service saving an older copy of the config can't bring a cleared pause back.
+    public string HistoryPausedQuota { get; set; } = string.Empty; // "iot" | "storage" | "unknown" | ""
+    public DateTime? HistoryPausedSince { get; set; } // the server's "since" (UTC); null if unknown
 }

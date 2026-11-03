@@ -30,6 +30,7 @@ import OeeTab from './components/OeeTab';
 import SettingsTab from './components/SettingsTab';
 import DiagnosticLogsTab from './components/DiagnosticLogsTab';
 import CriticalAlertBanner from './components/CriticalAlertBanner';
+import HistoryPausedBanner from './components/HistoryPausedBanner';
 import OnboardingWizard from './components/OnboardingWizard';
 import OnboardingTourBanner from './components/OnboardingTourBanner';
 
@@ -485,6 +486,7 @@ function EdgeInner({ forceOnboarding = false }: { forceOnboarding?: boolean }) {
       <main className="main-content">
         <div className="content-area">
           <CriticalAlertBanner onOpenLogs={() => setActiveTab('logs')} />
+          <HistoryPausedBanner pause={dashboard?.historyPause} />
           {!isSyncEnabled && (
             <div className="banner-warning">
               <AlertTriangle size={20} />
